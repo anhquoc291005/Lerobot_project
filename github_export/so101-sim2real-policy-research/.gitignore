@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Local data and heavy artifacts
+outputs/
+checkpoints/
+trained_model/
+pretrained_model/
+datasets/
+data/
+cache/
+wandb/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.mp4
+*.avi
+*.mov
+
+# Large generated/raw analysis files
+verification_*_sample.csv
+rollout_raw_parameters_flat.csv
+
+# System/editor
+.DS_Store
+.idea/
+.vscode/
+
+*.pt
+*.pth
+*.safetensors
+*.bin
+__pycache__/
+venv/

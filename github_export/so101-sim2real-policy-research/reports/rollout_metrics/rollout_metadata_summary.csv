@@ -1,0 +1,8 @@
+key,value
+dataset_repo_id,vasco281204/rollout_sentry_data_20260703_102554
+fps,30
+total_frames,553
+total_episodes,1
+duration_s,18.399999618530273
+robot_type,so_follower
+joint_names,"shoulder_pan.pos,shoulder_lift.pos,elbow_flex.pos,wrist_flex.pos,wrist_roll.pos,gripper.pos"

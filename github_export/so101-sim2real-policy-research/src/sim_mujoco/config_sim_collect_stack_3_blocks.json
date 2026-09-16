@@ -1,0 +1,139 @@
+{
+  "env": {
+    "backend": "mujoco_xml",
+    "xml_path": "reference/sim_assets/so_arm100_simulation/SO101/scene.xml",
+    "top_camera_name": "top_cam",
+    "gripper_camera_name": "front_cam",
+    "front_camera_brightness_gain": 1.2,
+    "image_height": 480,
+    "image_width": 640,
+    "frame_skip": 33,
+    "state_source": "qpos",
+    "clip_actions_to_ctrlrange": true,
+    "qpos_reset_noise_std": 0.0,
+    "seed": 42,
+    "reset_each_episode_seed": true,
+    "reset_between_episodes": true,
+    "max_steps_per_episode": 3600,
+    "stack_random_placements": {
+      "enabled": true,
+      "mode": "cell",
+      "bodies": [
+        "box_white",
+        "box_green",
+        "box_blue"
+      ],
+      "cell_jitter": 0.008,
+      "min_cell_distance": 0.12,
+      "x_range": [
+        0.17,
+        0.28
+      ],
+      "y_range": [
+        -0.14,
+        0.14
+      ],
+      "z": 0.015,
+      "min_distance": 0.05,
+      "random_yaw": true,
+      "target_zone_pos": [
+        0.264,
+        -0.0175
+      ],
+      "min_dist_to_target": 0.065,
+      "excluded_cells": [
+        "e1", "e2", "e3", "e4", "e5", "e6", "e7",
+        "c1", "c7",
+        "d1", "d2", "d6", "d7"
+      ]
+    }
+  },
+  "dataset": {
+    "repo_id": "anhquoc29/stack_3_box_white_green_blue_simulation",
+    "root": "datasets/stack_3_box_white_green_blue_simulation",
+    "single_task": "Stack 3 blocks (30x30x30 mm): white at the bottom, green in the middle, blue on top.",
+    "robot_type": "so_follower",
+    "fps": 30,
+    "num_episodes": 200,
+    "episode_time_s": 120,
+    "use_videos": true,
+    "video_backend": "pyav",
+    "vcodec": "libsvtav1",
+    "data_files_size_in_mb": 100,
+    "video_files_size_in_mb": 200,
+    "push_to_hub": true,
+    "cleanup_local_after_push": false,
+    "private": false,
+    "auto_resume_if_root_exists": true,
+    "tags": [
+      "sim",
+      "mujoco",
+      "so101",
+      "leader-teleop",
+      "stack-3-blocks",
+      "stack_3_box_white_green_blue_simulation",
+      "white-box",
+      "cam-e9",
+      "30x30x30",
+      "degree",
+      "640x480"
+    ],
+    "streaming_encoding": true,
+    "encoder_threads": 2,
+    "encoder_queue_maxsize": 30,
+    "image_writer_threads": 0
+  },
+  "adapter": {
+    "state_key": "agent_pos",
+    "top_image_key": "pixels.top",
+    "gripper_image_key": "pixels.gripper",
+    "top_dataset_camera_key": "top",
+    "secondary_dataset_camera_key": "front",
+    "dataset_angle_unit": "degree",
+    "expected_image_hw": [
+      480,
+      640
+    ],
+    "state_names": [
+      "shoulder_pan.pos",
+      "shoulder_lift.pos",
+      "elbow_flex.pos",
+      "wrist_flex.pos",
+      "wrist_roll.pos",
+      "gripper.pos"
+    ],
+    "action_names": [
+      "shoulder_pan.pos",
+      "shoulder_lift.pos",
+      "elbow_flex.pos",
+      "wrist_flex.pos",
+      "wrist_roll.pos",
+      "gripper.pos"
+    ]
+  },
+  "action_source": {
+    "type": "scripted",
+    "scripted_callable": "real_leader_script:real_leader_action"
+  },
+  "recording": {
+    "sleep_to_fps": true,
+    "control_fps": 30,
+    "prepare_time_s": 0,
+    "require_enter_before_episode": true,
+    "save_partial_episode_on_interrupt": false,
+    "display_camera_preview": true,
+    "preview_window_name": "sim_collect_stack_3_blocks",
+    "preview_scale": 1.0,
+    "top_grid": {
+      "enabled": true,
+      "rows": 5,
+      "cols": 7,
+      "labels": true,
+      "margin_left": 16,
+      "margin_top": 32,
+      "margin_right": 16,
+      "margin_bottom": 0
+    }
+  },
+  "resume": false
+}

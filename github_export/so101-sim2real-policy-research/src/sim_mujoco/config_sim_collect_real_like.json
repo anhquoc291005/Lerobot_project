@@ -1,0 +1,102 @@
+{
+  "env": {
+    "backend": "mujoco_xml",
+    "xml_path": "reference/sim_assets/so_arm100_simulation/SO101/scene.xml",
+    "top_camera_name": "top_cam",
+    "gripper_camera_name": "front_cam",
+    "image_height": 480,
+    "image_width": 640,
+    "frame_skip": 33,
+    "state_source": "qpos",
+    "clip_actions_to_ctrlrange": true,
+    "qpos_reset_noise_std": 0.0,
+    "seed": 0,
+    "reset_each_episode_seed": false,
+    "reset_between_episodes": false,
+    "max_steps_per_episode": 2400
+  },
+  "dataset": {
+    "repo_id": "vasco281204/so101_mujoco_real_like",
+    "root": "datasets/so101_mujoco_real_like",
+    "single_task": "Stack 3 blocks: black at the bottom, green in the middle, white on top.",
+    "robot_type": "so_follower",
+    "fps": 20,
+    "num_episodes": 30,
+    "episode_time_s": 120,
+    "use_videos": true,
+    "video_backend": "pyav",
+    "vcodec": "libsvtav1",
+    "data_files_size_in_mb": 100,
+    "video_files_size_in_mb": 200,
+    "push_to_hub": true,
+    "private": false,
+    "auto_resume_if_root_exists": false,
+    "tags": [
+      "sim",
+      "mujoco",
+      "so101",
+      "leader-teleop",
+      "continuous-no-reset",
+      "stack-3-blocks",
+      "degree",
+      "640x480"
+    ],
+    "streaming_encoding": true,
+    "encoder_threads": 2,
+    "encoder_queue_maxsize": 30,
+    "image_writer_threads": 0
+  },
+  "adapter": {
+    "state_key": "agent_pos",
+    "top_image_key": "pixels.top",
+    "gripper_image_key": "pixels.gripper",
+    "top_dataset_camera_key": "top",
+    "secondary_dataset_camera_key": "front",
+    "dataset_angle_unit": "degree",
+    "expected_image_hw": [
+      480,
+      640
+    ],
+    "state_names": [
+      "shoulder_pan.pos",
+      "shoulder_lift.pos",
+      "elbow_flex.pos",
+      "wrist_flex.pos",
+      "wrist_roll.pos",
+      "gripper.pos"
+    ],
+    "action_names": [
+      "shoulder_pan.pos",
+      "shoulder_lift.pos",
+      "elbow_flex.pos",
+      "wrist_flex.pos",
+      "wrist_roll.pos",
+      "gripper.pos"
+    ]
+  },
+  "action_source": {
+    "type": "scripted",
+    "scripted_callable": "real_leader_script:real_leader_action"
+  },
+  "recording": {
+    "sleep_to_fps": true,
+    "control_fps": 20,
+    "prepare_time_s": 0,
+    "require_enter_before_episode": true,
+    "save_partial_episode_on_interrupt": false,
+    "display_camera_preview": true,
+    "preview_window_name": "sim_collect_real_like",
+    "preview_scale": 0.5,
+    "top_grid": {
+      "enabled": true,
+      "rows": 5,
+      "cols": 7,
+      "labels": true,
+      "margin_left": 16,
+      "margin_top": 32,
+      "margin_right": 16,
+      "margin_bottom": 0
+    }
+  },
+  "resume": false
+}

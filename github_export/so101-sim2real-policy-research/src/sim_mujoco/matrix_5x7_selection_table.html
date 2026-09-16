@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bảng chọn matrix 5x7</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 28px;
+      color: #222;
+      line-height: 1.5;
+    }
+    h1 {
+      font-size: 22px;
+      margin-bottom: 8px;
+    }
+    .note {
+      margin: 6px 0 18px;
+      font-size: 14px;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      max-width: 820px;
+      margin-top: 12px;
+      font-size: 14px;
+    }
+    th, td {
+      border: 1px solid #444;
+      padding: 8px 10px;
+      text-align: center;
+    }
+    th {
+      background: #f2f2f2;
+      font-weight: 700;
+    }
+    td:first-child {
+      font-weight: 700;
+      background: #fafafa;
+    }
+    pre {
+      max-width: 820px;
+      background: #f7f7f7;
+      border: 1px solid #ddd;
+      padding: 12px;
+      overflow-x: auto;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Bảng chọn matrix 5x7</h1>
+
+  <div class="note">
+    Loại bỏ toàn bộ <strong>hàng a</strong>, <strong>hàng e</strong>, <strong>c1</strong>, <strong>c7</strong>, <strong>d1</strong>, <strong>d2</strong>, <strong>d6</strong>, <strong>d7</strong>, <strong>b1</strong>, <strong>b7</strong> để còn 13 ô an toàn trong tầm với robot SO-101.
+    Mỗi ô ban đầu chọn 4 vị trí khác nhau, không trùng ô ban đầu.
+  </div>
+
+  <table id="selection-table">
+    <thead>
+      <tr>
+        <th>Ô ban đầu</th>
+        <th>Lần 1</th>
+        <th>Lần 2</th>
+        <th>Lần 3</th>
+        <th>Lần 4</th>
+      </tr>
+    </thead>
+    <tbody>
+          <tr><td>b2</td><td>d4</td><td>b4</td><td>b3</td><td>c2</td></tr>
+          <tr><td>b3</td><td>b6</td><td>d5</td><td>b5</td><td>b4</td></tr>
+          <tr><td>b4</td><td>d4</td><td>c6</td><td>b3</td><td>c4</td></tr>
+          <tr><td>b5</td><td>b2</td><td>d5</td><td>b3</td><td>b6</td></tr>
+          <tr><td>b6</td><td>b5</td><td>c6</td><td>d3</td><td>b2</td></tr>
+          <tr><td>c2</td><td>c6</td><td>b5</td><td>d5</td><td>c4</td></tr>
+          <tr><td>c3</td><td>b5</td><td>c5</td><td>d3</td><td>b6</td></tr>
+          <tr><td>c4</td><td>b2</td><td>b4</td><td>c3</td><td>c2</td></tr>
+          <tr><td>c5</td><td>b6</td><td>b4</td><td>b5</td><td>c2</td></tr>
+          <tr><td>c6</td><td>b3</td><td>d5</td><td>c3</td><td>d4</td></tr>
+          <tr><td>d3</td><td>c2</td><td>d5</td><td>c6</td><td>b6</td></tr>
+          <tr><td>d4</td><td>b2</td><td>c4</td><td>c5</td><td>b3</td></tr>
+          <tr><td>d5</td><td>c3</td><td>b3</td><td>c5</td><td>b6</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Dữ liệu để đưa vào Python</h2>
+  <pre id="selection-data">{
+  "b2": [
+    "d4",
+    "b4",
+    "b3",
+    "c2"
+  ],
+  "b3": [
+    "b6",
+    "d5",
+    "b5",
+    "b4"
+  ],
+  "b4": [
+    "d4",
+    "c6",
+    "b3",
+    "c4"
+  ],
+  "b5": [
+    "b2",
+    "d5",
+    "b3",
+    "b6"
+  ],
+  "b6": [
+    "b5",
+    "c6",
+    "d3",
+    "b2"
+  ],
+  "c2": [
+    "c6",
+    "b5",
+    "d5",
+    "c4"
+  ],
+  "c3": [
+    "b5",
+    "c5",
+    "d3",
+    "b6"
+  ],
+  "c4": [
+    "b2",
+    "b4",
+    "c3",
+    "c2"
+  ],
+  "c5": [
+    "b6",
+    "b4",
+    "b5",
+    "c2"
+  ],
+  "c6": [
+    "b3",
+    "d5",
+    "c3",
+    "d4"
+  ],
+  "d3": [
+    "c2",
+    "d5",
+    "c6",
+    "b6"
+  ],
+  "d4": [
+    "b2",
+    "c4",
+    "c5",
+    "b3"
+  ],
+  "d5": [
+    "c3",
+    "b3",
+    "c5",
+    "b6"
+  ]
+}</pre>
+
+  <script>
+    const validCells = ["b2", "b3", "b4", "b5", "b6", "c2", "c3", "c4", "c5", "c6", "d3", "d4", "d5"];
+    const selectionPlan = {
+    "b2": [
+        "d4",
+        "b4",
+        "b3",
+        "c2"
+    ],
+    "b3": [
+        "b6",
+        "d5",
+        "b5",
+        "b4"
+    ],
+    "b4": [
+        "d4",
+        "c6",
+        "b3",
+        "c4"
+    ],
+    "b5": [
+        "b2",
+        "d5",
+        "b3",
+        "b6"
+    ],
+    "b6": [
+        "b5",
+        "c6",
+        "d3",
+        "b2"
+    ],
+    "c2": [
+        "c6",
+        "b5",
+        "d5",
+        "c4"
+    ],
+    "c3": [
+        "b5",
+        "c5",
+        "d3",
+        "b6"
+    ],
+    "c4": [
+        "b2",
+        "b4",
+        "c3",
+        "c2"
+    ],
+    "c5": [
+        "b6",
+        "b4",
+        "b5",
+        "c2"
+    ],
+    "c6": [
+        "b3",
+        "d5",
+        "c3",
+        "d4"
+    ],
+    "d3": [
+        "c2",
+        "d5",
+        "c6",
+        "b6"
+    ],
+    "d4": [
+        "b2",
+        "c4",
+        "c5",
+        "b3"
+    ],
+    "d5": [
+        "c3",
+        "b3",
+        "c5",
+        "b6"
+    ]
+};
+  </script>
+</body>
+</html>

@@ -1,0 +1,101 @@
+{
+  "env": {
+    "backend": "mujoco_xml",
+    "xml_path": "reference/sim_assets/so_arm100_simulation/SO101/scene.xml",
+    "top_camera_name": "top_cam",
+    "gripper_camera_name": "gripper_cam",
+    "image_height": 480,
+    "image_width": 640,
+    "frame_skip": 33,
+    "state_source": "qpos",
+    "clip_actions_to_ctrlrange": true,
+    "qpos_reset_noise_std": 0.0,
+    "matrix_random_placements": {
+      "table_path": "src/sim_mujoco/matrix_5x7_selection_table.html",
+      "red_box_body": "pick_box",
+      "container_body": "container_box",
+      "red_box_z": 0.011,
+      "container_z": 0.0,
+      "red_box_region_margin": 0.0,
+      "red_box_reach_center_x": 0.015,
+      "red_box_reach_center_y": 0.0,
+      "red_box_reach_radius": 0.445,
+      "red_box_max_sample_attempts": 100,
+      "red_box_random_yaw": true
+    },
+    "seed": 0,
+    "reset_each_episode_seed": true,
+    "max_steps_per_episode": 1800
+  },
+  "dataset": {
+  "repo_id": "vasco281204/so101_pick_red_block_real_5x9_reachable",
+  "root": "datasets/so101_pick_red_block_real_5x9_reachable",
+  "num_episodes": 200,
+  "episode_time_s": 30,
+  "push_to_hub": true,
+  "private": false,
+  "auto_resume_if_root_exists": true,
+  "tags": [
+    "real",
+    "so101",
+    "top-camera",
+    "5x9-grid",
+    "reachable-plan",
+    "degree",
+    "640x480"
+  ],
+  "streaming_encoding": true,
+  "encoder_threads": 2,
+  "encoder_queue_maxsize": 30,
+  "image_writer_threads": 0
+},
+  "adapter": {
+    "state_key": "agent_pos",
+    "top_image_key": "pixels.top",
+    "gripper_image_key": "pixels.gripper",
+    "dataset_angle_unit": "degree",
+    "expected_image_hw": [
+      480,
+      640
+    ],
+   "state_names": [
+  "shoulder_pan.pos",
+  "shoulder_lift.pos",
+  "elbow_flex.pos",
+  "wrist_flex.pos",
+  "wrist_roll.pos",
+  "gripper.pos"
+],
+"action_names": [
+  "shoulder_pan.pos",
+  "shoulder_lift.pos",
+  "elbow_flex.pos",
+  "wrist_flex.pos",
+  "wrist_roll.pos",
+  "gripper.pos"
+]
+  },
+  "action_source": {
+    "type": "scripted",
+    "constant": null,
+    "scripted_callable": "real_leader_script:real_leader_action"
+  },
+  "recording": {
+    "sleep_to_fps": true,
+    "control_fps": 30,
+    "display_camera_preview": true,
+    "preview_window_name": "sim_collect_preview",
+    "preview_scale": 0.5,
+    "top_grid": {
+      "enabled": true,
+      "rows": 5,
+      "cols": 9,
+      "labels": true,
+      "margin_left": 16,
+      "margin_top": 32,
+      "margin_right": 16,
+      "margin_bottom": 0
+    }
+  },
+  "resume": false
+}

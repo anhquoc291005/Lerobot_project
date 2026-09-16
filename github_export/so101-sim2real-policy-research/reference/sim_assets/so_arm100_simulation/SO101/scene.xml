@@ -1,0 +1,67 @@
+<mujoco model="scene">
+    <include file="so101_new_calib.xml" />
+
+    <option timestep="0.001" integrator="implicitfast" iterations="200" tolerance="1e-10" />
+
+    <default>
+        <default class="task_collision">
+            <geom contype="1" conaffinity="1" condim="4" solref="0.01 1" friction="1.2 0.01 0.001"
+                solimp="0.999 0.9999 0.00001" />
+        </default>
+        <default class="box_object">
+            <geom type="box" size="0.015 0.015 0.015" mass="0.025"
+                contype="1" conaffinity="1" condim="4"
+                friction="1.4 0.02 0.001" solref="0.005 1" solimp="0.95 0.99 0.001"
+                margin="0.0005" />
+        </default>
+    </default>
+
+    <visual>
+        <headlight diffuse="0.5 0.5 0.5" ambient="0.24 0.24 0.24" specular="0 0 0" />
+        <rgba haze="0.15 0.25 0.35 1" />
+        <global azimuth="160" elevation="-20" />
+    </visual>
+
+    <asset>
+        <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512"
+            height="3072" />
+        <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4"
+            rgb2="0.1 0.2 0.3"
+            markrgb="0.8 0.8 0.8" width="300" height="300" />
+        <material name="groundplane" rgba="0.46 0.48 0.44 1" reflectance="0.08" />
+        <material name="box_black_matte" rgba="0.12 0.12 0.12 1" reflectance="0.05" />
+        <material name="box_green_matte" rgba="0.15 0.75 0.20 1" reflectance="0.08" />
+        <material name="box_blue_matte" rgba="0.10 0.55 0.95 1" reflectance="0.08" />
+        <material name="box_white_matte" rgba="0.94 0.94 0.94 1" reflectance="0.08" />
+        <material name="target_zone_mat" rgba="0.85 0.70 0.15 0.8" reflectance="0.05" />
+    </asset>
+
+    <worldbody>
+        <light pos="0 0 3.5" dir="0 0 -1" directional="true" />
+        <camera name="top_cam" pos="0.22 0 0.54" xyaxes="0 0.999391 -0.0349 -1 0 0" fovy="55" />
+        <camera name="front_cam" pos="0.65 0 0.14" xyaxes="0 1 0 -0.233445 0 0.972370" fovy="52" />
+        <geom name="floor" class="task_collision" size="0 0 0.05" pos="0 0 0" type="plane" material="groundplane"
+            friction="0.03 0.03 0.001" />
+
+        <!-- Khu vực đích đánh dấu vị trí xếp chồng (Stacking Target Zone) - Căn trong ô C4, sát đường giao ô C4 và D4 (kích thước thu nhỏ 2/3) -->
+        <site name="stack_target_zone" pos="0.264 -0.0175 0.001" size="0.0267 0.0267 0.001" type="box" material="target_zone_mat" />
+
+        <!-- Khối 1: Màu TRẮNG (Đặt ở đáy) - Kích thước 30 x 30 x 30 mm -->
+        <body name="box_white" pos="0.22 -0.08 0.015">
+            <freejoint name="box_white_joint" />
+            <geom name="box_white_geom" class="box_object" material="box_white_matte" />
+        </body>
+
+        <!-- Khối 2: Màu XANH LÁ (Đặt ở giữa) - Kích thước 30 x 30 x 30 mm -->
+        <body name="box_green" pos="0.25 0.0 0.015">
+            <freejoint name="box_green_joint" />
+            <geom name="box_green_geom" class="box_object" material="box_green_matte" />
+        </body>
+
+        <!-- Khối 3: Màu XANH NƯỚC BIỂN (Đặt ở trên cùng) - Kích thước 30 x 30 x 30 mm -->
+        <body name="box_blue" pos="0.22 0.08 0.015">
+            <freejoint name="box_blue_joint" />
+            <geom name="box_blue_geom" class="box_object" material="box_blue_matte" />
+        </body>
+    </worldbody>
+</mujoco>
