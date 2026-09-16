@@ -1,0 +1,23 @@
+# Dữ liệu train, video và datasets mô phỏng
+data/
+datasets/
+outputs/
+scratch/
+*.mp4
+*.parquet
+
+# Checkpoint và trọng số mô hình
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
+
+# Python cache và môi trường ảo
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.egg-info/
+.DS_Store
+*.zip
