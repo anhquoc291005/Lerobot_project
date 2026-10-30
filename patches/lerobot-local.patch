@@ -1,0 +1,1340 @@
+diff --git a/src/lerobot/envs/__init__.py b/src/lerobot/envs/__init__.py
+index 277fd04f..5ff692f5 100644
+--- a/src/lerobot/envs/__init__.py
++++ b/src/lerobot/envs/__init__.py
+@@ -18,8 +18,9 @@
+ # from lerobot.utils.import_utils import require_package
+ # require_package("gymnasium", extra="<update_extra>", import_name="gymnasium")
+ 
+-from .configs import AlohaEnv, EnvConfig, HILSerlRobotEnvConfig, HubEnvConfig, PushtEnv
++from .configs import AlohaEnv, EnvConfig, HILSerlRobotEnvConfig, HubEnvConfig, PushtEnv, SO101Env, SO101Stack3BlocksEnv
+ from .factory import make_env, make_env_config, make_env_pre_post_processors
++from .so101 import SO101Stack3BlocksEnv as SO101Stack3BlocksEnvCore
+ from .utils import check_env_attributes_and_types, close_envs, env_to_policy_features, preprocess_observation
+ 
+ __all__ = [
+@@ -28,6 +29,9 @@ __all__ = [
+     "HILSerlRobotEnvConfig",
+     "HubEnvConfig",
+     "PushtEnv",
++    "SO101Env",
++    "SO101Stack3BlocksEnv",
++    "SO101Stack3BlocksEnvCore",
+     "check_env_attributes_and_types",
+     "close_envs",
+     "env_to_policy_features",
+@@ -36,3 +40,4 @@ __all__ = [
+     "make_env_pre_post_processors",
+     "preprocess_observation",
+ ]
++
+diff --git a/src/lerobot/envs/configs.py b/src/lerobot/envs/configs.py
+index 0c3075b4..aa0874fa 100644
+--- a/src/lerobot/envs/configs.py
++++ b/src/lerobot/envs/configs.py
+@@ -907,3 +907,73 @@ class RoboMMEEnv(EnvConfig):
+             wrist_camera_name=self.wrist_camera_name,
+             env_cls=env_cls,
+         )
++
++
++@EnvConfig.register_subclass("so101_stack_3_blocks")
++@dataclass
++class SO101Stack3BlocksEnv(EnvConfig):
++    """Môi trường mô phỏng SO-101 Stack 3 Blocks (hộp ngẫu nhiên theo ô lưới 5x7).
++
++    Được thiết kế đồng bộ hoàn toàn với dữ liệu thực nghiệm:
++    - 3 khối hộp 30x30x30 mm: Black (đáy), Green (giữa), Blue (trên cùng).
++    - Vị trí random: 1 ô trái, 1 ô phải, 1 ô giữa theo ô lưới camera top.
++    - Cặp camera kép 640x480: top_cam và front_cam (gain 1.2).
++    - Tần số: 30 FPS.
++    - Đơn vị state & action: Độ (Degrees) tương thích trực tiếp mô hình ACT.
++    """
++
++    task: str | None = "SO101Stack3Blocks-v0"
++    fps: int = 30
++    episode_length: int = 1800
++    obs_type: str = "pixels_agent_pos"
++    observation_height: int = 480
++    observation_width: int = 640
++    render_mode: str = "rgb_array"
++    xml_path: str | None = None
++    features: dict[str, PolicyFeature] = field(default_factory=dict)
++    features_map: dict[str, str] = field(default_factory=dict)
++
++    def __post_init__(self):
++        self.features = {
++            ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(6,)),
++            "agent_pos": PolicyFeature(type=FeatureType.STATE, shape=(6,)),
++            "pixels/top": PolicyFeature(
++                type=FeatureType.VISUAL, shape=(self.observation_height, self.observation_width, 3)
++            ),
++            "pixels/front": PolicyFeature(
++                type=FeatureType.VISUAL, shape=(self.observation_height, self.observation_width, 3)
++            ),
++        }
++        default_features_map = {
++            ACTION: ACTION,
++            "agent_pos": OBS_STATE,
++            "top": f"{OBS_IMAGE}.top",
++            "pixels/top": f"{OBS_IMAGES}.top",
++            "front": f"{OBS_IMAGE}.front",
++            "pixels/front": f"{OBS_IMAGES}.front",
++        }
++        self.features_map = {**default_features_map, **self.features_map}
++
++    @property
++    def gym_kwargs(self) -> dict:
++        return {
++            "xml_path": self.xml_path,
++            "max_episode_steps": self.episode_length,
++            "render_mode": self.render_mode,
++            "image_height": self.observation_height,
++            "image_width": self.observation_width,
++            "fps": self.fps,
++        }
++
++    def create_envs(self, n_envs: int, use_async_envs: bool = False):
++        from lerobot.envs.so101 import create_so101_stack_3_blocks_envs
++
++        return create_so101_stack_3_blocks_envs(self, n_envs=n_envs, use_async_envs=use_async_envs)
++
++
++@EnvConfig.register_subclass("so101")
++@dataclass
++class SO101Env(SO101Stack3BlocksEnv):
++    """Alias cho so101_stack_3_blocks."""
++    pass
++
+diff --git a/src/lerobot/envs/so101.py b/src/lerobot/envs/so101.py
+new file mode 100644
+index 00000000..6ac431c4
+--- /dev/null
++++ b/src/lerobot/envs/so101.py
+@@ -0,0 +1,535 @@
++# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from __future__ import annotations
++
++import math
++import os
++from pathlib import Path
++from typing import Any
++
++import cv2
++import gymnasium as gym
++from gymnasium import spaces
++import mujoco
++import numpy as np
++
++
++# Danh sach o bi loai bo theo thiet lap thuc te
++DEFAULT_STACK_EXCLUDED_CELLS: tuple[str, ...] = (
++    "e1", "e2", "e3", "e4", "e5", "e6", "e7",
++    "c1", "c7",
++    "d1", "d2", "d6", "d7",
++)
++
++# Toa do tam chuan xac cua cac o luoi tren mat san (z=0.015m)
++# Can chinh dong deu voi 4 canh bien cua o tren camera top (5x7)
++DEFAULT_STACK_CELL_CENTERS: dict[str, tuple[float, float]] = {
++    "b2": (0.1362, -0.2171),
++    "b3": (0.1367, -0.1166),
++    "b5": (0.1378, 0.0795),
++    "b6": (0.1384, 0.1772),
++    "c2": (0.2383, -0.2226),
++    "c3": (0.2383, -0.1188),
++    "c5": (0.2383, 0.0795),
++    "c6": (0.2383, 0.1772),
++    "d3": (0.3406, -0.1166),
++    "d4": (0.3427, -0.0171),
++    "d5": (0.3395, 0.0795),
++}
++
++DEFAULT_STACK_LEFT_CELLS: tuple[str, ...] = ("b2", "b3", "c2", "c3", "d3")
++DEFAULT_STACK_RIGHT_CELLS: tuple[str, ...] = ("b5", "b6", "c5", "c6", "d5")
++
++DEFAULT_TARGET_ZONE_POS: tuple[float, float] = (0.264, -0.0175)
++
++
++def _resolve_default_scene_xml() -> Path:
++    """Tim duong dan toi file scene.xml cua SO-101."""
++    candidates = [
++        Path("/home/anhquoc2910/Lerobot_project/github_export/so101-sim2real-policy-research/reference/sim_assets/so_arm100_simulation/SO101/scene.xml"),
++        Path(__file__).resolve().parent.parent.parent.parent / "github_export/so101-sim2real-policy-research/reference/sim_assets/so_arm100_simulation/SO101/scene.xml",
++        Path.cwd() / "github_export/so101-sim2real-policy-research/reference/sim_assets/so_arm100_simulation/SO101/scene.xml",
++        Path.cwd() / "reference/sim_assets/so_arm100_simulation/SO101/scene.xml",
++    ]
++    for cand in candidates:
++        if cand.exists():
++            return cand.resolve()
++    # Fallback ve candidate dau tien
++    return candidates[0]
++
++
++def _yaw_to_quat(yaw: float) -> np.ndarray:
++    half = yaw * 0.5
++    return np.array([math.cos(half), 0.0, 0.0, math.sin(half)], dtype=np.float64)
++
++
++def draw_grid_5x7(
++    image: np.ndarray,
++    rows: int = 5,
++    cols: int = 7,
++    labels: bool = True,
++    margin_left: int = 16,
++    margin_top: int = 32,
++    margin_right: int = 16,
++    margin_bottom: int = 0,
++) -> None:
++    """Ve luoi 5x7 len anh BGR de can chinh giong preview thu thap data."""
++    h, w = image.shape[:2]
++    x_min = margin_left
++    x_max = w - margin_right
++    y_min = margin_top
++    y_max = h - margin_bottom
++
++    row_names = ("a", "b", "c", "d", "e")
++    grid_w = x_max - x_min
++    grid_h = y_max - y_min
++
++    # Ve duong doc
++    for c in range(cols + 1):
++        x = int(x_min + round(c * grid_w / cols))
++        cv2.line(image, (x, y_min), (x, y_max), (80, 80, 80), 1)
++
++    # Ve duong ngang
++    for r in range(rows + 1):
++        y = int(y_min + round(r * grid_h / rows))
++        cv2.line(image, (x_min, y), (x_max, y), (80, 80, 80), 1)
++
++    if labels:
++        for r in range(rows):
++            for c in range(cols):
++                rx = int(x_min + round(c * grid_w / cols))
++                ry = int(y_min + round(r * grid_h / rows))
++                lbl = f"{row_names[r]}{c + 1}"
++                cv2.putText(
++                    image,
++                    lbl,
++                    (rx + 4, ry + 18),
++                    cv2.FONT_HERSHEY_SIMPLEX,
++                    0.38,
++                    (130, 130, 130),
++                    1,
++                    cv2.LINE_AA,
++                )
++
++
++class SO101Stack3BlocksEnv(gym.Env):
++    """Moi truong Gymnasium mo phong SO-101 xep chong 3 khoi hop ngau nhien (Stack 3 Blocks).
++    
++    Cac thong so duoc thiet lap dong bo 100% voi qua trinh thu thap du lieu:
++    - MuJoCo Model: SO-101 moi calib (sts3215 gains, friction=1.2)
++    - 3 Khoi hop: 30x30x30 mm (box_black, box_green, box_blue)
++    - Dich xep chong: stack_target_zone o vi tri C4 sát D4 [0.264, -0.0175, 0.001]
++    - Che do random: Grid-cell based (1 o ben trai, 1 o ben phai, 1 o giua, min dist >= 12cm)
++    - Tan so: 30 FPS (timestep 0.001s, frame_skip 33)
++    - Camera:
++        + top: top_cam (640x480, fovy 55)
++        + front: front_cam (640x480, fovy 52, brightness_gain 1.2)
++    - Don vi State & Action: DO (DEGREES) de tuong thich truc tiep voi ACT Policy da train!
++    """
++
++    metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
++
++    def __init__(
++        self,
++        xml_path: str | Path | None = None,
++        max_episode_steps: int = 1800,
++        render_mode: str = "rgb_array",
++        top_camera_name: str = "top_cam",
++        front_camera_name: str = "front_cam",
++        front_camera_brightness_gain: float = 1.2,
++        image_height: int = 480,
++        image_width: int = 640,
++        frame_skip: int = 33,
++        cell_jitter: float = 0.008,
++        min_cell_distance: float = 0.12,
++        render_composite: bool = True,
++        render_grid_overlay: bool = True,
++        **kwargs: Any,
++    ):
++        super().__init__()
++        self._max_episode_steps = max_episode_steps
++        self.render_mode = render_mode
++        self.task_description = (
++            "Stack 3 blocks (30x30x30 mm): white at the bottom, green in the middle, blue on top."
++        )
++        self.task = "so101_stack_3_blocks"
++
++        if xml_path is None:
++            resolved_xml = _resolve_default_scene_xml()
++        else:
++            resolved_xml = Path(xml_path)
++            if not resolved_xml.is_absolute():
++                candidates = [
++                    Path.cwd() / resolved_xml,
++                    Path("/home/anhquoc2910/Lerobot_project") / resolved_xml,
++                    _resolve_default_scene_xml().parent / resolved_xml,
++                ]
++                for c in candidates:
++                    if c.exists():
++                        resolved_xml = c
++                        break
++
++        if not resolved_xml.exists():
++            raise FileNotFoundError(f"MuJoCo XML scene not found at: {resolved_xml}")
++
++        self.xml_path = str(resolved_xml)
++        self.top_camera_name = top_camera_name
++        self.front_camera_name = front_camera_name
++        self.front_camera_brightness_gain = front_camera_brightness_gain
++        self.image_height = image_height
++        self.image_width = image_width
++        self.frame_skip = frame_skip
++        self.cell_jitter = cell_jitter
++        self.min_cell_distance = min_cell_distance
++        self.render_composite = render_composite
++        self.render_grid_overlay = render_grid_overlay
++
++        # Khoi tao MuJoCo Model & Data
++        self.model = mujoco.MjModel.from_xml_path(self.xml_path)
++        self.model.vis.global_.offwidth = max(int(self.model.vis.global_.offwidth), image_width * 2)
++        self.model.vis.global_.offheight = max(int(self.model.vis.global_.offheight), image_height)
++        self.data = mujoco.MjData(self.model)
++
++        self._renderer = mujoco.Renderer(
++            self.model,
++            height=self.image_height,
++            width=self.image_width,
++        )
++
++        # Gioi han dieu khien (Actuator control range)
++        # MuJoCo luu goc theo radian, policy su dung do (degrees)
++        self._ctrl_low_rad = self.model.actuator_ctrlrange[:, 0].copy().astype(np.float32)
++        self._ctrl_high_rad = self.model.actuator_ctrlrange[:, 1].copy().astype(np.float32)
++        self._ctrl_low_deg = np.rad2deg(self._ctrl_low_rad).astype(np.float32)
++        self._ctrl_high_deg = np.rad2deg(self._ctrl_high_rad).astype(np.float32)
++
++        # Action Space theo Do (DEGREES)
++        self.action_space = spaces.Box(
++            low=self._ctrl_low_deg,
++            high=self._ctrl_high_deg,
++            dtype=np.float32,
++        )
++
++        # Observation Space theo chuan LeRobot
++        # agent_pos: 6 truc khop theo DO (degrees)
++        # pixels: top (480x640x3) va front (480x640x3)
++        self.observation_space = spaces.Dict(
++            {
++                "agent_pos": spaces.Box(
++                    low=-180.0,
++                    high=180.0,
++                    shape=(self.model.nu,),
++                    dtype=np.float32,
++                ),
++                "pixels": spaces.Dict(
++                    {
++                        "top": spaces.Box(
++                            low=0,
++                            high=255,
++                            shape=(self.image_height, self.image_width, 3),
++                            dtype=np.uint8,
++                        ),
++                        "front": spaces.Box(
++                            low=0,
++                            high=255,
++                            shape=(self.image_height, self.image_width, 3),
++                            dtype=np.uint8,
++                        ),
++                    }
++                ),
++            }
++        )
++
++        self._step_count = 0
++        self._consecutive_success_steps = 0
++        self._last_placements: dict[str, dict[str, Any]] = {}
++        self._last_rendered_frame: np.ndarray | None = None
++
++    def reset(
++        self,
++        *,
++        seed: int | None = None,
++        options: dict[str, Any] | None = None,
++    ) -> tuple[dict[str, Any], dict[str, Any]]:
++        super().reset(seed=seed)
++        episode_index = int((options or {}).get("episode_index", 0))
++
++        mujoco.mj_resetData(self.model, self.data)
++        mujoco.mj_forward(self.model, self.data)
++
++        # Ap dung co che phan bo ngau nhien 3 khoi hop theo o luoi
++        self._apply_stack_random_placements(episode_index)
++        mujoco.mj_forward(self.model, self.data)
++
++        self._step_count = 0
++        self._consecutive_success_steps = 0
++
++        obs = self._get_obs()
++        info = {
++            "is_success": False,
++            "episode_index": episode_index,
++            "stack_random_placements": dict(self._last_placements),
++        }
++        return obs, info
++
++    def step(
++        self, action: np.ndarray
++    ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
++        self._step_count += 1
++        action = np.asarray(action, dtype=np.float32).reshape(-1)
++        if action.shape != (self.model.nu,):
++            raise ValueError(
++                f"Action shape mismatch: expected ({self.model.nu},), got {action.shape}."
++            )
++
++        # Chuyen action tu do (degrees) sang radian cho MuJoCo
++        action_deg = np.clip(action, self._ctrl_low_deg, self._ctrl_high_deg)
++        action_rad = np.deg2rad(action_deg).astype(np.float64)
++
++        self.data.ctrl[:] = action_rad
++        mujoco.mj_step(self.model, self.data, nstep=self.frame_skip)
++
++        obs = self._get_obs()
++
++        # Kiem tra tieu chi thanh cong xep chong 3 khoi hop
++        is_stacked = self._check_stack_success()
++        if is_stacked:
++            self._consecutive_success_steps += 1
++        else:
++            self._consecutive_success_steps = 0
++
++        # Can duy tri thap on dinh it nhat 15 buoc (0.5 giay o 30 FPS)
++        is_success = self._consecutive_success_steps >= 15
++        reward = 1.0 if is_success else 0.0
++
++        terminated = is_success
++        truncated = self._step_count >= self._max_episode_steps
++
++        info = {
++            "is_success": is_success,
++            "is_stacked": is_stacked,
++            "sim_time": float(self.data.time),
++            "step_count": self._step_count,
++            "stack_random_placements": dict(self._last_placements),
++        }
++        return obs, reward, terminated, truncated, info
++
++    def render(self) -> np.ndarray:
++        top_img = self._render_camera(self.top_camera_name)
++        front_img = self._render_camera(self.front_camera_name)
++
++        if not self.render_composite:
++            return top_img
++
++        top_view = top_img.copy()
++        if self.render_grid_overlay:
++            # Ve luoi len camera top
++            top_bgr = cv2.cvtColor(top_view, cv2.COLOR_RGB2BGR)
++            draw_grid_5x7(top_bgr, rows=5, cols=7, labels=True)
++            top_view = cv2.cvtColor(top_bgr, cv2.COLOR_BGR2RGB)
++
++        # Ghep song song 2 camera: Left = Top (co luoi), Right = Front
++        composite = np.hstack([top_view, front_img])
++        self._last_rendered_frame = composite
++        return composite
++
++    def close(self) -> None:
++        if self._renderer is not None:
++            self._renderer.close()
++
++    def _get_obs(self) -> dict[str, Any]:
++        # agent_pos tinh theo DO (degrees) de hop voi ACT policy da train tren stack_3_box_30x3030
++        agent_pos_rad = self.data.qpos[: self.model.nu].copy().astype(np.float32)
++        agent_pos_deg = np.rad2deg(agent_pos_rad).astype(np.float32)
++
++        top_img = self._render_camera(self.top_camera_name)
++        front_img = self._render_camera(self.front_camera_name)
++
++        return {
++            "agent_pos": agent_pos_deg,
++            "pixels": {
++                "top": top_img,
++                "front": front_img,
++            },
++        }
++
++    def _render_camera(self, camera_name: str) -> np.ndarray:
++        self._renderer.update_scene(self.data, camera=camera_name)
++        rgb = self._renderer.render()
++        if (
++            self.front_camera_brightness_gain != 1.0
++            and camera_name == self.front_camera_name
++        ):
++            rgb = np.clip(
++                rgb.astype(np.float32) * self.front_camera_brightness_gain,
++                0,
++                255,
++            ).astype(np.uint8)
++        return rgb
++
++    def _apply_stack_random_placements(self, episode_index: int) -> None:
++        """Phan bo 3 khoi hop theo o luoi rieng biet (chuan data collection)."""
++        excluded_set = set(DEFAULT_STACK_EXCLUDED_CELLS)
++        cell_centers = {
++            k: v
++            for k, v in DEFAULT_STACK_CELL_CENTERS.items()
++            if k not in excluded_set and not k.startswith("e")
++        }
++        left_cells = [c for c in DEFAULT_STACK_LEFT_CELLS if c in cell_centers]
++        right_cells = [c for c in DEFAULT_STACK_RIGHT_CELLS if c in cell_centers]
++        all_cells = list(cell_centers.keys())
++
++        c_left = str(self.np_random.choice(left_cells))
++        c_right = str(self.np_random.choice(right_cells))
++        p_left = np.array(cell_centers[c_left], dtype=np.float64)
++        p_right = np.array(cell_centers[c_right], dtype=np.float64)
++
++        candidates = [
++            c
++            for c in all_cells
++            if c not in (c_left, c_right)
++            and np.linalg.norm(np.array(cell_centers[c], dtype=np.float64) - p_left)
++            >= self.min_cell_distance
++            and np.linalg.norm(np.array(cell_centers[c], dtype=np.float64) - p_right)
++            >= self.min_cell_distance
++        ]
++        if not candidates:
++            candidates = [c for c in all_cells if c not in (c_left, c_right)]
++        c_third = str(self.np_random.choice(candidates))
++
++        chosen_cells = [c_left, c_right, c_third]
++        self.np_random.shuffle(chosen_cells)
++
++        body_bottom = "box_white" if mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "box_white") >= 0 else "box_black"
++        bodies = [body_bottom, "box_green", "box_blue"]
++        self._last_placements = {}
++
++        for body_name, cell_name in zip(bodies, chosen_cells):
++            base_x, base_y = cell_centers[cell_name]
++            jx = float(self.np_random.uniform(-self.cell_jitter, self.cell_jitter))
++            jy = float(self.np_random.uniform(-self.cell_jitter, self.cell_jitter))
++            pos = np.array([base_x + jx, base_y + jy, 0.015], dtype=np.float64)
++            yaw = float(self.np_random.uniform(-np.pi, np.pi))
++
++            self._place_body(body_name, pos, quat=_yaw_to_quat(yaw))
++            self._last_placements[body_name] = {
++                "body": body_name,
++                "episode_index": episode_index,
++                "cell": cell_name,
++                "x": float(pos[0]),
++                "y": float(pos[1]),
++                "z": float(pos[2]),
++                "yaw": yaw,
++            }
++
++    def _place_body(
++        self, body_name: str, pos: np.ndarray, quat: np.ndarray | None = None
++    ) -> None:
++        body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, body_name)
++        if body_id < 0:
++            return
++        jnt_id = self.model.body_jntadr[body_id]
++        if jnt_id < 0:
++            return
++        qpos_adr = self.model.jnt_qposadr[jnt_id]
++        self.data.qpos[qpos_adr : qpos_adr + 3] = pos
++        if quat is not None:
++            self.data.qpos[qpos_adr + 3 : qpos_adr + 7] = quat
++
++    def _check_stack_success(self) -> bool:
++        """Kiem tra xem 3 khoi hop da duoc xep chong dung vi tri va dung thu tu chua:
++        - Day: box_white (hoac box_black) tren vung stack_target_zone [0.264, -0.0175] (z ~ 0.015m)
++        - Giua: box_green tren dinh khoi day (z ~ 0.045m)
++        - Tren: box_blue tren dinh box_green (z ~ 0.075m)
++        """
++        id_bottom = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "box_white")
++        if id_bottom < 0:
++            id_bottom = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "box_black")
++        id_green = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "box_green")
++        id_blue = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "box_blue")
++
++        if id_bottom < 0 or id_green < 0 or id_blue < 0:
++            return False
++
++        pos_bottom = self.data.xpos[id_bottom]
++        pos_green = self.data.xpos[id_green]
++        pos_blue = self.data.xpos[id_blue]
++
++        # 1. Khối Đáy (Trắng / Đen) ở trong ô đích stack_target_zone và nằm trên mặt bàn
++        dist_target = math.hypot(
++            pos_bottom[0] - DEFAULT_TARGET_ZONE_POS[0],
++            pos_bottom[1] - DEFAULT_TARGET_ZONE_POS[1],
++        )
++        if dist_target > 0.045 or pos_bottom[2] > 0.025:
++            return False
++
++        # 2. Khối Xanh lá nằm trên khối Đáy (khoảng cách tâm ngang < 25mm, chiều cao z ~ 0.045m)
++        dist_bg = math.hypot(pos_green[0] - pos_bottom[0], pos_green[1] - pos_bottom[1])
++        if dist_bg > 0.025 or not (0.035 <= pos_green[2] <= 0.055):
++            return False
++
++        # 3. Khối Xanh biển nằm trên khối Xanh lá (khoảng cách tâm ngang < 25mm, chiều cao z ~ 0.075m)
++        dist_gb = math.hypot(pos_blue[0] - pos_green[0], pos_blue[1] - pos_green[1])
++        if dist_gb > 0.025 or not (0.065 <= pos_blue[2] <= 0.088):
++            return False
++
++        return True
++
++
++def create_so101_stack_3_blocks_envs(
++    cfg: Any,
++    n_envs: int,
++    use_async_envs: bool = False,
++) -> dict[str, dict[int, gym.vector.VectorEnv]]:
++    """Ham tao VectorEnv cho LeRobot eval hoac training."""
++    from lerobot.envs.configs import _make_vec_env_cls
++    from lerobot.envs.utils import freeze_after_episode_end
++
++    env_cls = _make_vec_env_cls(use_async_envs, n_envs)
++
++    def _make_one():
++        env = SO101Stack3BlocksEnv(
++            xml_path=getattr(cfg, "xml_path", None),
++            max_episode_steps=getattr(cfg, "episode_length", 1800),
++            render_mode=getattr(cfg, "render_mode", "rgb_array"),
++            image_height=getattr(cfg, "observation_height", 480),
++            image_width=getattr(cfg, "observation_width", 640),
++            fps=getattr(cfg, "fps", 30),
++        )
++        return env
++
++    env_fn = freeze_after_episode_end(_make_one)
++    vec = env_cls([env_fn for _ in range(n_envs)])
++    return {getattr(cfg, "type", "so101_stack_3_blocks"): {0: vec}}
++
++
++# Dang ky voi Gymnasium
++try:
++    gym.register(
++        id="so101/SO101Stack3Blocks-v0",
++        entry_point="lerobot.envs.so101:SO101Stack3BlocksEnv",
++        max_episode_steps=1800,
++    )
++except Exception:
++    pass
++
++try:
++    gym.register(
++        id="SO101Stack3Blocks-v0",
++        entry_point="lerobot.envs.so101:SO101Stack3BlocksEnv",
++        max_episode_steps=1800,
++    )
++except Exception:
++    pass
+diff --git a/src/lerobot/motors/motors_bus.py b/src/lerobot/motors/motors_bus.py
+index f4a747b4..6a348238 100644
+--- a/src/lerobot/motors/motors_bus.py
++++ b/src/lerobot/motors/motors_bus.py
+@@ -24,7 +24,7 @@ from __future__ import annotations
+ import abc
+ import logging
+ import time
+-from collections.abc import Sequence
++from collections.abc import Iterator, Sequence
+ from contextlib import contextmanager
+ from dataclasses import dataclass
+ from enum import Enum
+@@ -674,21 +674,24 @@ class SerialMotorsBus(MotorsBusBase):
+         pass
+ 
+     @contextmanager
+-    def torque_disabled(self, motors: str | list[str] | None = None):
++    def torque_disabled(
++        self, motors: str | list[str] | None = None, *, num_retry: int = 0
++    ) -> Iterator[None]:
+         """Context-manager that guarantees torque is re-enabled.
+ 
+         This helper is useful to temporarily disable torque when configuring motors.
++        ``num_retry`` sets the additional communication attempts for both torque transitions.
+ 
+         Examples:
+             >>> with bus.torque_disabled():
+             ...     # Safe operations here
+             ...     pass
+         """
+-        self.disable_torque(motors)
++        self.disable_torque(motors, num_retry=num_retry)
+         try:
+             yield
+         finally:
+-            self.enable_torque(motors)
++            self.enable_torque(motors, num_retry=num_retry)
+ 
+     def set_timeout(self, timeout_ms: int | None = None):
+         """Change the packet timeout used by the SDK.
+diff --git a/src/lerobot/robots/so_follower/so_follower.py b/src/lerobot/robots/so_follower/so_follower.py
+index 85dc43dc..276d3d81 100644
+--- a/src/lerobot/robots/so_follower/so_follower.py
++++ b/src/lerobot/robots/so_follower/so_follower.py
+@@ -157,7 +157,8 @@ class SOFollower(Robot):
+         print("Calibration saved to", self.calibration_fpath)
+ 
+     def configure(self) -> None:
+-        with self.bus.torque_disabled():
++        # Retry lost status packets during startup torque/Lock writes.
++        with self.bus.torque_disabled(num_retry=2):
+             self.bus.configure_motors()
+             for motor in self.bus.motors:
+                 self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
+diff --git a/src/lerobot/scripts/lerobot_record.py b/src/lerobot/scripts/lerobot_record.py
+index f8e9f943..3fe835af 100644
+--- a/src/lerobot/scripts/lerobot_record.py
++++ b/src/lerobot/scripts/lerobot_record.py
+@@ -93,6 +93,7 @@ import logging
+ import time
+ from dataclasses import asdict, dataclass
+ from pprint import pformat
++from typing import Callable
+ 
+ from lerobot.cameras import CameraConfig  # noqa: F401
+ from lerobot.cameras.opencv import OpenCVCameraConfig  # noqa: F401
+@@ -155,7 +156,8 @@ from lerobot.utils.constants import ACTION, OBS_STR
+ from lerobot.utils.cycle_timer import CycleTimer
+ from lerobot.utils.feature_utils import build_dataset_frame, combine_feature_dicts
+ from lerobot.utils.import_utils import register_third_party_plugins
+-from lerobot.utils.keyboard_input import init_keyboard_listener
++from lerobot.utils.keyboard_input import init_keyboard_listener, init_manual_recording_listener
++from lerobot.utils.recording_status import report_recording_status
+ from lerobot.utils.utils import (
+     init_logging,
+     log_say,
+@@ -184,10 +186,14 @@ class RecordConfig:
+     display_port: int | None = None
+     # Whether to display compressed (JPEG) images instead of raw frames
+     display_compressed_images: bool = False
++    # Optional normalized camera-space polygons, displayed without modifying dataset frames.
++    display_workspace: str | None = None
+     # Use vocal synthesis to read events.
+     play_sounds: bool = True
+     # Resume recording on an existing dataset.
+     resume: bool = False
++    # Space starts/ends each episode; Q cancels, Escape saves/exits.
++    manual_episode_control: bool = False
+ 
+     def __post_init__(self):
+         if self.teleop is None:
+@@ -240,7 +246,7 @@ def record_loop(
+     ],  # runs after robot
+     dataset: LeRobotDataset | None = None,
+     teleop: Teleoperator | list[Teleoperator] | None = None,
+-    control_time_s: int | None = None,
++    control_time_s: int | float | None = None,
+     single_task: str | None = None,
+     display_data: bool = False,
+     display_mode: str = "rerun",
+@@ -383,12 +389,23 @@ def record(
+     teleop_action_processor: RobotProcessorPipeline | None = None,
+     robot_action_processor: RobotProcessorPipeline | None = None,
+     robot_observation_processor: RobotProcessorPipeline | None = None,
++    episode_saved_callback: Callable[[LeRobotDataset, bool], LeRobotDataset] | None = None,
+ ) -> LeRobotDataset:
++    """Record episodes, optionally replacing the closed dataset through a post-save callback.
++
++    The callback receives the saved dataset and whether another episode will run.
++    It may finalize/upload that dataset and return a fresh write-mode dataset.
++    """
+     init_logging()
+     logging.info(pformat(asdict(cfg)))
+     if cfg.display_data:
+         init_visualization(
+-            cfg.display_mode, session_name="recording", ip=cfg.display_ip, port=cfg.display_port
++            cfg.display_mode,
++            session_name="recording",
++            ip=cfg.display_ip,
++            port=cfg.display_port,
++            workspace_boundary=cfg.display_workspace,
++            show_recording_status=cfg.manual_episode_control,
+         )
+     display_compressed_images = (
+         True
+@@ -433,6 +450,13 @@ def record(
+     # every number that answers "did I record at `fps`?".
+     timer = CycleTimer(cfg.dataset.fps)
+ 
++    def status(recording: bool, episode_index: int, detail: str) -> None:
++        report_recording_status(
++            recording, episode_index,
++            display_mode=cfg.display_mode if cfg.display_data else None,
++            detail=detail,
++        )
++
+     try:
+         if cfg.resume:
+             num_cameras = len(robot.cameras) if hasattr(robot, "cameras") else 0
+@@ -483,7 +507,14 @@ def record(
+             teleop.connect()
+         robot.connect()
+ 
+-        listener, events = init_keyboard_listener()
++        if cfg.manual_episode_control:
++            listener, events = init_manual_recording_listener()
++            if listener is None:
++                raise RuntimeError(
++                    "Manual recording needs keyboard input. Run in an interactive terminal and keep it focused."
++                )
++        else:
++            listener, events = init_keyboard_listener()
+ 
+         if not cfg.dataset.streaming_encoding:
+             logging.info(
+@@ -494,6 +525,37 @@ def record(
+             recorded_episodes = 0
+             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
+                 episode_index = dataset.num_episodes
++                if cfg.manual_episode_control:
++                    events["phase"] = "waiting"
++                    status(False, episode_index, "Chờ Space để bắt đầu thu. Camera đang xem trước.")
++                    if not events["start_episode"] and not events["stop_recording"]:
++                        # Keep teleoperation and camera guides live without adding dataset frames.
++                        record_loop(
++                            robot=robot,
++                            events=events,
++                            fps=cfg.dataset.fps,
++                            teleop_action_processor=teleop_action_processor,
++                            robot_action_processor=robot_action_processor,
++                            robot_observation_processor=robot_observation_processor,
++                            teleop=teleop,
++                            control_time_s=float("inf"),
++                            single_task=cfg.dataset.single_task,
++                            display_data=cfg.display_data,
++                            display_mode=cfg.display_mode,
++                            display_compressed_images=display_compressed_images,
++                        )
++                    if events["stop_recording"]:
++                        break
++                    if not events["start_episode"]:
++                        continue
++                    events["start_episode"] = False
++                    events["exit_early"] = False
++                    events["rerecord_episode"] = False
++                    if events["stop_recording"]:
++                        break
++                    events["phase"] = "recording"
++                    status(True, episode_index, "Đang ghi dữ liệu. Bấm Space để kết thúc và lưu episode.")
++                    timer.restart()
+                 log_say(f"Recording episode {episode_index}", cfg.play_sounds)
+                 record_loop(
+                     robot=robot,
+@@ -511,10 +573,16 @@ def record(
+                     display_compressed_images=display_compressed_images,
+                     timer=timer,
+                 )
++                if cfg.manual_episode_control:
++                    events["phase"] = "saving"
++                    status(
++                        False, episode_index,
++                        "Đang hủy episode…" if events["rerecord_episode"] else "Đang lưu episode…",
++                    )
+ 
+                 # Execute a few seconds without recording to give time to manually reset the environment
+                 # Skip reset for the last episode to be recorded
+-                if not events["stop_recording"] and (
++                if not cfg.manual_episode_control and not events["stop_recording"] and (
+                     (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
+                 ):
+                     log_say("Reset the environment", cfg.play_sounds)
+@@ -538,12 +606,22 @@ def record(
+                     events["rerecord_episode"] = False
+                     events["exit_early"] = False
+                     dataset.clear_episode_buffer()
++                    if cfg.manual_episode_control:
++                        status(False, episode_index, "Đã hủy episode. Chờ Space để thu lại.")
+                     timer.log_episode_summary("discarded episode")
+                     timer.restart()
+                     continue
+ 
++                if cfg.manual_episode_control and dataset.writer.episode_buffer["size"] == 0:
++                    # Escape can arrive before the first frame; never save an empty episode.
++                    dataset.clear_episode_buffer()
++                    timer.restart()
++                    continue
++
+                 dataset.save_episode()
+                 recorded_episodes += 1
++                if cfg.manual_episode_control:
++                    status(False, episode_index, "Đã lưu episode. Chờ Space để thu episode tiếp theo.")
+                 # Close the window on the episode just saved.  The digest is emitted on
+                 # the next episode's first tick, so the reset phase, `save_episode` and
+                 # the spoken prompts in between are excluded from the cadence instead of
+@@ -551,14 +629,19 @@ def record(
+                 # exempts that first tick, whose cameras have been idle for seconds.
+                 timer.log_episode_summary(f"episode {episode_index}")
+                 timer.restart()
++                if episode_saved_callback is not None:
++                    has_next = recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]
++                    dataset = episode_saved_callback(dataset, has_next)
+     finally:
+         # First, and in `finally`: ^C is how most recording sessions end, and the summary
+         # is most useful before the video encoding and the hub upload scroll it away.
+         timer.log_run_summary()
+ 
++        if cfg.manual_episode_control:
++            status(False, dataset.num_episodes if dataset is not None else 0, "Đã dừng thu. Đang đóng file.")
+         log_say("Stop recording", cfg.play_sounds, blocking=True)
+ 
+-        if dataset:
++        if dataset is not None:
+             dataset.finalize()
+ 
+         if robot.is_connected:
+diff --git a/src/lerobot/scripts/lerobot_teleoperate.py b/src/lerobot/scripts/lerobot_teleoperate.py
+index 81bd98e6..de9e99c8 100644
+--- a/src/lerobot/scripts/lerobot_teleoperate.py
++++ b/src/lerobot/scripts/lerobot_teleoperate.py
+@@ -150,6 +150,8 @@ class TeleoperateConfig:
+     display_port: int | None = None
+     # Whether to display compressed (JPEG) images instead of raw frames
+     display_compressed_images: bool = False
++    # Optional normalized camera-space polygons, displayed only (not a motion limit).
++    display_workspace: str | None = None
+ 
+ 
+ def teleop_loop(
+@@ -255,7 +257,11 @@ def teleoperate(cfg: TeleoperateConfig):
+     logging.info(pformat(asdict(cfg)))
+     if cfg.display_data:
+         init_visualization(
+-            cfg.display_mode, session_name="teleoperation", ip=cfg.display_ip, port=cfg.display_port
++            cfg.display_mode,
++            session_name="teleoperation",
++            ip=cfg.display_ip,
++            port=cfg.display_port,
++            workspace_boundary=cfg.display_workspace,
+         )
+     display_compressed_images = (
+         True
+diff --git a/src/lerobot/utils/keyboard_input.py b/src/lerobot/utils/keyboard_input.py
+index 00c0f53e..da282c84 100644
+--- a/src/lerobot/utils/keyboard_input.py
++++ b/src/lerobot/utils/keyboard_input.py
+@@ -393,6 +393,42 @@ def create_key_listener(dispatch: Callable[[str], None], *, controls_help: str =
+     return None
+ 
+ 
++def apply_manual_recording_control(control: str, events: dict) -> None:
++    """Space starts/saves an episode, Q discards it, Escape saves/exits the session."""
++    key = control.lower()
++    phase = events.get("phase", "waiting")
++    if key == "esc":
++        events["stop_recording"] = True
++        events["exit_early"] = True
++    elif key == "space" and phase == "waiting":
++        events["start_episode"] = True
++        events["exit_early"] = True
++        events["phase"] = "starting"
++    elif key in ("q", "left", "r") and phase == "recording":
++        events["rerecord_episode"] = True
++        events["exit_early"] = True
++        events["phase"] = "cancelling"
++    elif key in ("space", "right", "n") and phase == "recording":
++        events["exit_early"] = True
++        events["phase"] = "saving"
++
++
++def init_manual_recording_listener():
++    """Create manual episode controls using the existing X11/terminal backends."""
++    events = {
++        "exit_early": False,
++        "rerecord_episode": False,
++        "stop_recording": False,
++        "start_episode": False,
++        "phase": "waiting",
++    }
++    listener = create_key_listener(
++        lambda key: apply_manual_recording_control(key, events),
++        controls_help="Space=start/save episode, Q=cancel episode, Esc=save and exit",
++    )
++    return listener, events
++
++
+ def init_keyboard_listener():
+     """Initialize a non-blocking keyboard listener for interactive recording controls.
+ 
+diff --git a/src/lerobot/utils/rerun_visualization.py b/src/lerobot/utils/rerun_visualization.py
+index b7f0ccee..66466bf0 100644
+--- a/src/lerobot/utils/rerun_visualization.py
++++ b/src/lerobot/utils/rerun_visualization.py
+@@ -29,6 +29,7 @@ from lerobot.lerobot_types import RobotAction, RobotObservation
+ 
+ from .constants import ACTION, ACTION_PREFIX, OBS_PREFIX, OBS_STR
+ from .import_utils import require_package
++from .recording_status import RECORDING_STATUS_PATH
+ 
+ 
+ def _is_scalar(x):
+@@ -38,7 +39,11 @@ def _is_scalar(x):
+ 
+ 
+ def init_rerun(
+-    session_name: str = "lerobot_control_loop", ip: str | None = None, port: int | None = None
++    session_name: str = "lerobot_control_loop",
++    ip: str | None = None,
++    port: int | None = None,
++    *,
++    show_recording_status: bool = False,
+ ) -> None:
+     """
+     Initializes the Rerun SDK for visualizing the control loop.
+@@ -47,12 +52,14 @@ def init_rerun(
+         session_name: Name of the Rerun session.
+         ip: Optional IP for connecting to a Rerun server.
+         port: Optional port for connecting to a Rerun server.
++        show_recording_status: Show a status panel above the camera grid.
+     """
+ 
+     require_package("rerun-sdk", extra="viz", import_name="rerun")
+     import rerun as rr
+ 
+     log_rerun_data.blueprint = None  # Reset blueprint cache for new session
++    log_rerun_data.show_recording_status = show_recording_status
+ 
+     batch_size = os.getenv("RERUN_FLUSH_NUM_BYTES", "8000")
+     os.environ["RERUN_FLUSH_NUM_BYTES"] = batch_size
+@@ -89,7 +96,13 @@ def _build_blueprint(observation_paths: set[str], action_paths: set[str], image_
+     if action_paths:
+         views.append(rrb.TimeSeriesView(name="action", contents=sorted(action_paths)))
+ 
+-    return rrb.Blueprint(rrb.Grid(*views))
++    grid = rrb.Grid(*views)
++    if getattr(log_rerun_data, "show_recording_status", False):
++        status = rrb.TextDocumentView(
++            origin=RECORDING_STATUS_PATH, name="Trạng thái thu data", contents=[RECORDING_STATUS_PATH],
++        )
++        return rrb.Blueprint(rrb.Vertical(status, grid, row_shares=[0.18, 0.82]))
++    return rrb.Blueprint(grid)
+ 
+ 
+ def _ensure_blueprint(observation_paths: set[str], action_paths: set[str], image_paths: set[str]) -> None:
+diff --git a/src/lerobot/utils/visualization_utils.py b/src/lerobot/utils/visualization_utils.py
+index 482342a0..93dfdf47 100644
+--- a/src/lerobot/utils/visualization_utils.py
++++ b/src/lerobot/utils/visualization_utils.py
+@@ -25,9 +25,11 @@ from lerobot.lerobot_types import RobotAction, RobotObservation
+ 
+ from .foxglove_visualization import init_foxglove, log_foxglove_data, shutdown_foxglove
+ from .rerun_visualization import init_rerun, log_rerun_data, shutdown_rerun
++from .workspace_boundary import WorkspaceBoundaryOverlay
+ 
+ # Visualization backends selectable at runtime via a display-mode string (e.g. a --display_mode flag).
+ VISUALIZATION_MODES = ("rerun", "foxglove")
++_workspace_overlay: WorkspaceBoundaryOverlay | None = None
+ 
+ 
+ def init_visualization(
+@@ -36,16 +38,29 @@ def init_visualization(
+     session_name: str = "lerobot_control_loop",
+     ip: str | None = None,
+     port: int | None = None,
++    workspace_boundary: str | None = None,
++    show_recording_status: bool = False,
+ ) -> None:
+     """Initializes the visualization backend selected by ``display_mode``.
+ 
+     For ``"rerun"``, ``ip``/``port`` point at an optional remote Rerun server. For ``"foxglove"``,
+     ``ip`` is the interface to bind the WebSocket server to (``127.0.0.1`` for local only, ``0.0.0.0``
+     for all interfaces) and ``port`` is its port.
++    ``workspace_boundary`` optionally loads normalized polygons for separate 2D Rerun entities;
++    it never edits the observation arrays used by dataset recording.
+     """
+ 
++    global _workspace_overlay
++    _workspace_overlay = None
++    if workspace_boundary is not None:
++        if display_mode != "rerun":
++            raise ValueError("Workspace boundary display requires --display_mode=rerun.")
++        _workspace_overlay = WorkspaceBoundaryOverlay(workspace_boundary)
++
+     if display_mode == "rerun":
+-        init_rerun(session_name=session_name, ip=ip, port=port)
++        init_rerun(
++            session_name=session_name, ip=ip, port=port, show_recording_status=show_recording_status,
++        )
+     elif display_mode == "foxglove":
+         init_foxglove(host=ip or "127.0.0.1", port=port)
+     else:
+@@ -62,6 +77,8 @@ def log_visualization_data(
+ 
+     if display_mode == "rerun":
+         log_rerun_data(observation=observation, action=action, compress_images=compress_images)
++        if _workspace_overlay is not None:
++            _workspace_overlay.log_rerun(observation)
+     elif display_mode == "foxglove":
+         log_foxglove_data(observation=observation, action=action, compress_images=compress_images)
+     else:
+diff --git a/tests/robots/test_so100_follower.py b/tests/robots/test_so100_follower.py
+index 56706dc2..5930ced2 100644
+--- a/tests/robots/test_so100_follower.py
++++ b/tests/robots/test_so100_follower.py
+@@ -40,7 +40,7 @@ def _make_bus_mock() -> MagicMock:
+     bus.disconnect.side_effect = _disconnect
+ 
+     @contextmanager
+-    def _dummy_cm():
++    def _dummy_cm(*_args, **_kwargs):
+         yield
+ 
+     bus.torque_disabled.side_effect = _dummy_cm
+diff --git a/src/lerobot/utils/recording_status.py b/src/lerobot/utils/recording_status.py
+new file mode 100644
+index 00000000..60e1784d
+--- /dev/null
++++ b/src/lerobot/utils/recording_status.py
+@@ -0,0 +1,34 @@
++"""Display recording state independently of camera images and dataset features."""
++
++import logging
++
++from .import_utils import require_package
++
++RECORDING_STATUS_PATH = "recording_status"
++
++
++def report_recording_status(
++    recording: bool,
++    episode_index: int,
++    *,
++    display_mode: str | None = None,
++    detail: str = "",
++) -> None:
++    title = "ĐANG THU DATA" if recording else "CHƯA THU DATA"
++    logging.info("%s | Episode %s | %s", title, episode_index, detail)
++    if display_mode != "rerun":
++        return
++    require_package("rerun-sdk", extra="viz", import_name="rerun")
++    import rerun as rr
++
++    indicator = "🔴" if recording else "🟢"
++    document = (
++        f"# {indicator} {title}\n\n"
++        f"**Episode {episode_index}** — {detail}\n\n"
++        "**Space:** bắt đầu / kết thúc và lưu · **Q:** hủy episode · **Esc:** lưu và thoát"
++    )
++    rr.log(
++        RECORDING_STATUS_PATH,
++        rr.TextDocument(document, media_type=rr.MediaType.MARKDOWN),
++        static=True,
++    )
+diff --git a/src/lerobot/utils/workspace_boundary.py b/src/lerobot/utils/workspace_boundary.py
+new file mode 100644
+index 00000000..7be53e9c
+--- /dev/null
++++ b/src/lerobot/utils/workspace_boundary.py
+@@ -0,0 +1,96 @@
++"""Camera-space workspace guides, logged separately from recorded image pixels."""
++
++import json
++import logging
++from pathlib import Path
++
++import numpy as np
++
++from .import_utils import require_package
++
++
++class WorkspaceBoundaryOverlay:
++    """A visual guide only: these polygons do not constrain robot motion."""
++
++    def __init__(self, path: str | Path):
++        self.path = Path(path)
++        config = json.loads(self.path.read_text())
++        cameras = config.get("cameras")
++        if not isinstance(cameras, dict) or not cameras:
++            raise ValueError("Workspace boundary JSON must contain a nonempty 'cameras' object.")
++        self.boundaries = {}
++        for camera, boundary in cameras.items():
++            points = np.asarray(boundary["points"], dtype=np.float32)
++            if (
++                points.ndim != 2
++                or points.shape[1] != 2
++                or len(points) < 3
++                or not np.isfinite(points).all()
++                or np.any(points < 0)
++                or np.any(points > 1)
++            ):
++                raise ValueError(f"Boundary '{camera}' needs at least 3 normalized [x, y] points in [0, 1].")
++            area = np.sum(points[:, 0] * np.roll(points[:, 1], -1)) - np.sum(
++                points[:, 1] * np.roll(points[:, 0], -1)
++            )
++            if abs(area) < 1e-6:
++                raise ValueError(f"Boundary '{camera}' has zero area.")
++            color = np.asarray(boundary.get("color", [70, 255, 130]))
++            if (
++                color.shape != (3,)
++                or not np.isfinite(color).all()
++                or np.any(color < 0)
++                or np.any(color > 255)
++            ):
++                raise ValueError(f"Boundary '{camera}' color must be three RGB values in [0, 255].")
++            self.boundaries[camera] = {
++                "points": points,
++                "color": color.astype(np.uint8),
++                "label": boundary.get("label"),
++            }
++        self._logged_shapes = {}
++        self._checked_cameras = False
++
++    def points_for_image(self, camera: str, width: int, height: int) -> np.ndarray:
++        """Scale normalized points to the current image size without modifying the config."""
++        return self.boundaries[camera]["points"] * np.array([width - 1, height - 1])
++
++    def log_rerun(self, observation: dict | None) -> None:
++        if not observation:
++            return
++        require_package("rerun-sdk", extra="viz", import_name="rerun")
++        import rerun as rr
++
++        seen = set()
++        for key, frame in observation.items():
++            camera = str(key).rsplit(".", 1)[-1]
++            if camera not in self.boundaries or not isinstance(frame, np.ndarray) or frame.ndim != 3:
++                continue
++            seen.add(camera)
++            if frame.shape[0] in (1, 3, 4) and frame.shape[-1] not in (1, 3, 4):
++                height, width = frame.shape[1:]
++            else:
++                height, width = frame.shape[:2]
++            entity = str(key) if str(key).startswith("observation.") else f"observation.{key}"
++            if self._logged_shapes.get(entity) == (height, width):
++                continue
++            boundary = self.boundaries[camera]
++            points = self.points_for_image(camera, width, height)
++            closed = np.concatenate([points, points[:1]])
++            rr.log(
++                f"{entity}/workspace_boundary",
++                rr.LineStrips2D(
++                    [closed],
++                    colors=[boundary["color"]],
++                    radii=rr.Radius.ui_points(2.5),
++                    labels=[boundary["label"]] if boundary["label"] else None,
++                    show_labels=bool(boundary["label"]),
++                    draw_order=30,
++                ),
++                static=True,
++            )
++            self._logged_shapes[entity] = (height, width)
++        if not self._checked_cameras:
++            for camera in self.boundaries.keys() - seen:
++                logging.warning("Workspace guide camera '%s' is missing from displayed images.", camera)
++            self._checked_cameras = True
+diff --git a/tests/utils/test_workspace_boundary.py b/tests/utils/test_workspace_boundary.py
+new file mode 100644
+index 00000000..c464d344
+--- /dev/null
++++ b/tests/utils/test_workspace_boundary.py
+@@ -0,0 +1,90 @@
++"""Verify the guide's image coordinates and that display never changes dataset pixels."""
++
++import json
++import tempfile
++import unittest
++from pathlib import Path
++from unittest.mock import patch
++
++import numpy as np
++
++from lerobot.utils import visualization_utils as vu
++from lerobot.utils.workspace_boundary import WorkspaceBoundaryOverlay
++
++
++class WorkspaceBoundaryTests(unittest.TestCase):
++    def setUp(self):
++        self.directory = tempfile.TemporaryDirectory()
++        self.addCleanup(self.directory.cleanup)
++        self.config_path = Path(self.directory.name) / "workspace.json"
++        self.config = {"cameras": {"front": {"points": [[0.1, 0.2], [0.9, 0.2], [0.5, 0.8]]}}}
++        self.config_path.write_text(json.dumps(self.config))
++
++    def test_invalid_geometry_is_rejected(self):
++        invalid_points = [
++            [],
++            [[0, 0], [1, 1]],
++            [[0, 0], [0.5, 0.5], [1, 1]],
++            [[-0.1, 0], [1, 0], [0, 1]],
++            [[0, 0], [1, 0], [0, float("nan")]],
++        ]
++        for points in invalid_points:
++            with self.subTest(points=points):
++                self.config["cameras"]["front"]["points"] = points
++                self.config_path.write_text(json.dumps(self.config))
++                with self.assertRaises(ValueError):
++                    WorkspaceBoundaryOverlay(self.config_path)
++
++    def test_scaling_and_closed_polygon_for_hwc_and_chw(self):
++        import rerun as rr
++
++        overlay = WorkspaceBoundaryOverlay(self.config_path)
++        with patch.object(rr, "log") as log:
++            overlay.log_rerun({"front": np.zeros((101, 201, 3), dtype=np.uint8)})
++            self.assertEqual(log.call_args.args[0], "observation.front/workspace_boundary")
++            strips = log.call_args.args[1].strips.as_arrow_array().to_pylist()
++            np.testing.assert_allclose(strips[0], [[20, 20], [180, 20], [100, 80], [20, 20]])
++            self.assertTrue(log.call_args.kwargs["static"])
++            overlay.log_rerun({"front": np.zeros((3, 101, 201), dtype=np.uint8)})
++            self.assertEqual(log.call_count, 1)
++            overlay.log_rerun({"front": np.zeros((201, 401, 3), dtype=np.uint8)})
++            self.assertEqual(log.call_count, 2)
++            strips = log.call_args.args[1].strips.as_arrow_array().to_pylist()
++            np.testing.assert_allclose(strips[0], [[40, 40], [360, 40], [200, 160], [40, 40]])
++
++    def test_display_keeps_original_image_and_other_camera(self):
++        import rerun as rr
++
++        front = np.arange(10 * 20 * 3, dtype=np.uint8).reshape(10, 20, 3)
++        top = np.zeros_like(front)
++        original = front.copy()
++        observation = {"observation.images.front": front, "top": top, "joint.pos": 2.0}
++        with patch.object(vu, "init_rerun"), patch.object(vu, "log_rerun_data") as data_log:
++            vu.init_visualization("rerun", workspace_boundary=str(self.config_path))
++            self.addCleanup(setattr, vu, "_workspace_overlay", None)
++            with patch.object(rr, "log") as guide_log:
++                vu.log_visualization_data("rerun", observation=observation)
++            self.assertIs(data_log.call_args.kwargs["observation"], observation)
++            self.assertIs(observation["observation.images.front"], front)
++            np.testing.assert_array_equal(front, original)
++            np.testing.assert_array_equal(top, np.zeros_like(top))
++            self.assertEqual(guide_log.call_count, 1)
++            self.assertEqual(guide_log.call_args.args[0], "observation.images.front/workspace_boundary")
++
++    def test_new_session_clears_old_overlay(self):
++        with patch.object(vu, "init_rerun"):
++            vu.init_visualization("rerun", workspace_boundary=str(self.config_path))
++            self.addCleanup(setattr, vu, "_workspace_overlay", None)
++            self.assertIsNotNone(vu._workspace_overlay)
++            vu.init_visualization("rerun")
++            self.assertIsNone(vu._workspace_overlay)
++
++    def test_unsupported_backend_fails_before_startup(self):
++        with patch.object(vu, "init_foxglove") as startup:
++            with self.assertRaisesRegex(ValueError, "requires --display_mode=rerun"):
++                vu.init_visualization("foxglove", workspace_boundary=str(self.config_path))
++            startup.assert_not_called()
++
++
++if __name__ == "__main__":
++    unittest.main()

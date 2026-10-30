@@ -1,0 +1,16 @@
+{
+  "description": "Visual workspace inside the surrounding tools. top is the overhead camera /dev/video4; left is the side camera /dev/video2. This is not a robot motion limit.",
+  "cameras": {
+    "top": {
+      "color": [70, 255, 130],
+      "points": [
+        [0.3631, 0.0835],
+        [0.9155, 0.0835],
+        [0.9108, 0.3779],
+        [0.8545, 0.7683],
+        [0.3083, 0.7683],
+        [0.1455, 0.5825]
+      ]
+    }
+  }
+}
